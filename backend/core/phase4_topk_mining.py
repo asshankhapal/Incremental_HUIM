@@ -91,11 +91,17 @@ class TopKMiner:
                     UtilityListEntry(tid=txn.tid, exact_util=exact, remaining_util=remaining)
                 )
 
+        # Register all single-item patterns first to raise the min_util threshold immediately.
+        # This prevents exploring the exponential combination space with min_util = 0.0.
+        for ul in item_uls.values():
+            self._check_and_register(ul)
+
+        # Sort items by prefix utility descending for optimal DFS search order and faster pruning
+        sorted_items = sorted(item_uls.keys(), key=lambda x: self.prefix_util.get(x, 0.0), reverse=True)
+
         # DFS from each surviving single-item pattern
-        sorted_items = sorted(item_uls.keys())
         for i, item in enumerate(sorted_items):
             ul = item_uls[item]
-            self._check_and_register(ul)
             extensions = [item_uls[sorted_items[j]] for j in range(i + 1, len(sorted_items))]
             self._dfs_extend(ul, extensions, transactions)
 
