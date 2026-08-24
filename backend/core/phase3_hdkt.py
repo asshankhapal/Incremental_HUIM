@@ -30,7 +30,7 @@ class HDkTCalculator:
         self,
         current_batch_id: int,
         batch_new: Optional[TransactionBatch],
-        batch_old: Optional[TransactionBatch],
+        evicted_batches: list[TransactionBatch],
     ) -> float:
         """
         Run all three HDkT steps and return the current_min_util.
@@ -53,10 +53,9 @@ class HDkTCalculator:
                 if batch_new
                 else 0.0
             )
-            delta_old = (
-                self._pattern_utility_in_batch(pattern_items, batch_old)
-                if batch_old
-                else 0.0
+            delta_old = sum(
+                self._pattern_utility_in_batch(pattern_items, b)
+                for b in evicted_batches
             )
             proj = entry["avg_util"] + delta_new - delta_old
             projected.append(proj)

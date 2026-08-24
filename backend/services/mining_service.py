@@ -87,12 +87,12 @@ def run_dataset(transactions: list[TransactionIn] | list[dict], batch_size: int,
     # 2. Backup current config settings
     orig_top_k = config.top_k
     orig_top_n = config.top_n_results
-    orig_window_size = config.window_size
+    orig_trigger_size = config.batch_trigger_size
 
     # Temporarily adjust configuration parameters
     config.top_k = top_k
     config.top_n_results = top_k
-    config.window_size = len(txns_in)
+    config.batch_trigger_size = batch_size
 
     # 3. Partition transactions into sequential batches of size batch_size
     total_batches = 0
@@ -129,7 +129,7 @@ def run_dataset(transactions: list[TransactionIn] | list[dict], batch_size: int,
         # Restore configuration settings
         config.top_k = orig_top_k
         config.top_n_results = orig_top_n
-        config.window_size = orig_window_size
+        config.batch_trigger_size = orig_trigger_size
 
     return {
         "total_batches": total_batches,

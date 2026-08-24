@@ -30,10 +30,8 @@ class SlidingWindow:
 
     def __init__(self) -> None:
         self._window: deque[int] = deque()          # batch_ids in window
-        self._last_run_time: float = 0.0
+        self._last_run_time: float = time.time()
         self._reload_window()
-
-    
 
     def should_trigger(self) -> bool:
         """Return True if either trigger condition is satisfied."""
@@ -42,37 +40,36 @@ class SlidingWindow:
         volume_met = queued_count >= config.batch_trigger_size
         return time_elapsed or volume_met
 
- 
-
-    def update(self) -> tuple[Optional[TransactionBatch], Optional[TransactionBatch]]:
+    def update(self) -> tuple[Optional[TransactionBatch], list[TransactionBatch]]:
         """
         Execute the sliding-window step.
 
         Returns
         -------
-        (batch_new, batch_old)
+        (batch_new, evicted_batches)
             batch_new : the batch just added to the window (or None)
-            batch_old : the batch just evicted from the window (or None)
+            evicted_batches : list of batches just evicted from the window
         """
         self._last_run_time = time.time()
 
         # Find the next queued batch
         batch_new = self._pop_next_queued_batch()
         if batch_new is None:
-            return None, None
+            return None, []
 
         # Add to the window
         self._window.append(batch_new.batch_id)
         self._mark_batch_status(batch_new.batch_id, "active")
 
-        # Evict the oldest batch if window is over capacity
-        batch_old: Optional[TransactionBatch] = None
-        if self._window_transaction_count() > config.window_size:
+        # Evict the oldest batches if window is over capacity
+        evicted_batches: list[TransactionBatch] = []
+        while self._window_transaction_count() > config.window_size and self._window:
             oldest_id = self._window.popleft()
             batch_old = self._load_batch(oldest_id)
             self._mark_batch_status(oldest_id, "evicted")
+            evicted_batches.append(batch_old)
 
-        return batch_new, batch_old
+        return batch_new, evicted_batches
 
     
     def _reload_window(self) -> None:

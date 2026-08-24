@@ -47,6 +47,9 @@ class Pipeline:
 
         Returns a summary dict with timing, counts, and top results.
         """
+        from database import reset_query_count, get_query_count
+        reset_query_count()
+
         run_id = self._log_start()
         timings: dict[str, float] = {}
         summary: dict = {"run_id": run_id}
@@ -54,39 +57,46 @@ class Pipeline:
         try:
             import time
 
+            # ── Trigger Check ────────────────────────────────────
+            if not self.sliding_window.should_trigger():
+                summary["status"] = "no_trigger"
+                summary["message"] = "Trigger conditions not met."
+                self._log_finish(run_id, "no_trigger", summary)
+                return summary
+
             # ── Phase 1: Sliding Window ──────────────────────────
             t0 = time.perf_counter()
-            batch_new, batch_old = self.sliding_window.update()
+            batch_new, evicted_batches = self.sliding_window.update()
             timings["phase1_ms"] = (time.perf_counter() - t0) * 1000
-
+ 
             if batch_new is None:
                 summary["status"] = "no_data"
                 summary["message"] = "No queued batches to process."
                 self._log_finish(run_id, "no_data", summary)
                 return summary
-
+ 
             current_batch_id = batch_new.batch_id
             summary["batch_new_id"] = current_batch_id
             summary["batch_new_size"] = batch_new.size
-            summary["batch_old_id"] = batch_old.batch_id if batch_old else None
-
+            summary["batch_old_ids"] = [b.batch_id for b in evicted_batches]
+ 
             logger.info(
-                "Phase 1 done: added batch %d (%d txns), evicted batch %s",
+                "Phase 1 done: added batch %d (%d txns), evicted batches %s",
                 current_batch_id,
                 batch_new.size,
-                batch_old.batch_id if batch_old else "none",
+                [b.batch_id for b in evicted_batches] if evicted_batches else "none",
             )
-
+ 
             # ── Phase 2: Prefix Utility & MRU ────────────────────
             t0 = time.perf_counter()
-            self.prefix_updater.update(batch_new, batch_old)
+            self.prefix_updater.update(batch_new, evicted_batches, self.sliding_window.active_batch_ids)
             timings["phase2_ms"] = (time.perf_counter() - t0) * 1000
             logger.info("Phase 2 done: %d items tracked", len(self.prefix_updater.prefix_util))
-
+ 
             # ── Phase 3: HDkT Threshold ──────────────────────────
             t0 = time.perf_counter()
             current_min_util = self.hdkt.compute_threshold(
-                current_batch_id, batch_new, batch_old
+                current_batch_id, batch_new, evicted_batches
             )
             timings["phase3_ms"] = (time.perf_counter() - t0) * 1000
             summary["min_util_threshold"] = current_min_util
@@ -119,7 +129,23 @@ class Pipeline:
             ]
             logger.info("Phase 5 done: top-%d results returned", len(top_results))
 
+            # Collect search statistics and query counts
             summary["timings"] = timings
+            summary["sqlite_queries"] = get_query_count()
+            summary["dfs_nodes_visited"] = miner.dfs_nodes_visited
+            summary["layer1_pruned"] = miner.layer1_pruned
+            summary["layer2_pruned"] = miner.layer2_pruned
+            summary["utility_list_joins"] = miner.utility_list_joins
+
+            logger.info(
+                "Pipeline completed: %d nodes, %d L1 pruned, %d L2 pruned, %d joins, %d SQL queries",
+                miner.dfs_nodes_visited,
+                miner.layer1_pruned,
+                miner.layer2_pruned,
+                miner.utility_list_joins,
+                summary["sqlite_queries"],
+            )
+
             summary["status"] = "success"
             self._log_finish(run_id, "success", summary)
 
@@ -127,6 +153,7 @@ class Pipeline:
             logger.exception("Pipeline run %d failed", run_id)
             summary["status"] = "error"
             summary["error"] = str(exc)
+            summary["sqlite_queries"] = get_query_count()
             self._log_finish(run_id, "error", summary)
             raise
 

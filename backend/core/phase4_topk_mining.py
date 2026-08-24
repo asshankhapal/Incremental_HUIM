@@ -33,6 +33,11 @@ from models.transaction import (
 from models.pattern import PatternResult
 
 
+# Module-level caches to reuse utility lists within the current window mining execution
+_utility_list_cache: dict[tuple[str, ...], UtilityList] = {}
+_cached_window_ids: tuple[int, ...] = ()
+
+
 class TopKMiner:
     """
     Depth-first top-k high-utility itemset miner with dual pruning.
@@ -54,6 +59,19 @@ class TopKMiner:
         self._topk_heap: list[tuple[float, str]] = []
         self._results: list[PatternResult] = []
 
+        # Metrics counters
+        self.dfs_nodes_visited = 0
+        self.layer1_pruned = 0
+        self.layer2_pruned = 0
+        self.utility_list_joins = 0
+
+        # Enforce Cache Invalidation
+        global _utility_list_cache, _cached_window_ids
+        window_key = tuple(sorted(self.active_batch_ids))
+        if window_key != _cached_window_ids:
+            _utility_list_cache.clear()
+            _cached_window_ids = window_key
+
     # ── Public API ───────────────────────────────────────────────────
 
     def mine(self) -> list[PatternResult]:
@@ -62,48 +80,47 @@ class TopKMiner:
         if not transactions:
             return []
 
-        # Pre-sort items and utilities for each transaction once
+        # Pre-sort items and utilities for each transaction once lexicographically
         for txn in transactions:
             paired = sorted(zip(txn.items, txn.utilities), key=lambda x: x[0])
             txn.items = [p[0] for p in paired]
             txn.utilities = [p[1] for p in paired]
 
-        # Build initial utility lists for single items (Header Table) in a single pass
+        # Collect unique items across active transactions
+        all_items = sorted({item for txn in transactions for item in txn.items})
+
+        # Build initial utility lists for single items (Header Table) in a single pass or from cache
         item_uls: dict[str, UtilityList] = {}
-        for txn in transactions:
-            n = len(txn.utilities)
-            # Precompute suffix sums of utilities for fast remaining utility lookup
-            suffix_sums = [0.0] * (n + 1)
-            for idx in range(n - 1, -1, -1):
-                suffix_sums[idx] = suffix_sums[idx + 1] + txn.utilities[idx]
+        for item in all_items:
+            # ── Layer 1 prune ────────────────────────────────────
+            if self.prefix_util.get(item, 0.0) < self.min_util:
+                self.layer1_pruned += 1
+                continue  # prune entire branch
+            
+            cache_key = (item,)
+            if cache_key in _utility_list_cache:
+                item_uls[item] = _utility_list_cache[cache_key]
+            else:
+                ul = self._build_initial_ul(item, transactions)
+                _utility_list_cache[cache_key] = ul
+                item_uls[item] = ul
 
-            for idx, item in enumerate(txn.items):
-                # ── Layer 1 prune ────────────────────────────────────
-                if self.prefix_util.get(item, 0.0) < self.min_util:
-                    continue  # prune entire branch
-                
-                if item not in item_uls:
-                    item_uls[item] = UtilityList(pattern=(item,))
-                
-                exact = txn.utilities[idx]
-                remaining = suffix_sums[idx + 1]
-                item_uls[item].entries.append(
-                    UtilityListEntry(tid=txn.tid, exact_util=exact, remaining_util=remaining)
-                )
-
-        # Register all single-item patterns first to raise the min_util threshold immediately.
-        # This prevents exploring the exponential combination space with min_util = 0.0.
-        for ul in item_uls.values():
-            self._check_and_register(ul)
-
-        # Sort items by prefix utility descending for optimal DFS search order and faster pruning
-        sorted_items = sorted(item_uls.keys(), key=lambda x: self.prefix_util.get(x, 0.0), reverse=True)
+        # Sort items lexicographically (canonical order)
+        self.sorted_items = sorted(item_uls.keys())
+        self.item_ranks = {item: idx for idx, item in enumerate(self.sorted_items)}
+        self.item_uls = item_uls
 
         # DFS from each surviving single-item pattern
-        for i, item in enumerate(sorted_items):
+        for idx, item in enumerate(self.sorted_items):
             ul = item_uls[item]
-            extensions = [item_uls[sorted_items[j]] for j in range(i + 1, len(sorted_items))]
-            self._dfs_extend(ul, extensions, transactions)
+            
+            # Layer 1 prune check against the dynamically raised min_util threshold
+            if self.prefix_util.get(item, 0.0) < self.min_util:
+                self.layer1_pruned += 1
+                continue
+                
+            self._check_and_register(ul)
+            self._dfs_extend(ul, idx, transactions)
 
         return self._results
 
@@ -112,27 +129,46 @@ class TopKMiner:
     def _dfs_extend(
         self,
         ul_p: UtilityList,
-        extensions: list[UtilityList],
+        last_item_rank: int,
         transactions: list[Transaction],
     ) -> None:
         """Recursively extend pattern P with each candidate item Y."""
-        for i, ul_y in enumerate(extensions):
-            # Join utility lists  P ∪ Y → PY
-            ul_py = self._join_utility_lists(ul_p, ul_y, transactions)
+        self.dfs_nodes_visited += 1
+
+        # DFS candidates are items whose lexicographical rank is greater than ul_p's last item
+        for y_rank in range(last_item_rank + 1, len(self.sorted_items)):
+            y_item = self.sorted_items[y_rank]
+
+            # ── Layer 1 prune check before join ──────────────────
+            if self.prefix_util.get(y_item, 0.0) < self.min_util:
+                self.layer1_pruned += 1
+                continue
+
+            ul_y = self.item_uls[y_item]
+
+            # Check cache for joined utility list PY
+            cache_key = ul_p.pattern + (y_item,)
+            global _utility_list_cache
+            if cache_key in _utility_list_cache:
+                ul_py = _utility_list_cache[cache_key]
+            else:
+                self.utility_list_joins += 1
+                ul_py = self._join_utility_lists(ul_p, ul_y, transactions)
+                _utility_list_cache[cache_key] = ul_py
 
             exact = ul_py.sum_exact_util
 
-            # ── Layer 2 prune (upper-bound check) ────────────────
-            ub = ul_py.upper_bound
+            # ── Layer 2 prune check using global_MRU ─────────────
+            ub = exact + self.global_mru.get(y_item, 0.0)
             if ub < self.min_util:
-                continue  # prune this branch
+                self.layer2_pruned += 1
+                continue
 
             # Check if PY is a HUI
             self._check_and_register(ul_py)
 
             # Recurse deeper
-            further = extensions[i + 1:]
-            self._dfs_extend(ul_py, further, transactions)
+            self._dfs_extend(ul_py, y_rank, transactions)
 
     # ── Utility list construction ────────────────────────────────────
 
@@ -222,6 +258,7 @@ class TopKMiner:
                 SELECT tid, batch_id, items, utilities
                 FROM transactions
                 WHERE batch_id IN ({placeholders})
+                ORDER BY tid
                 """,
                 self.active_batch_ids,
             ).fetchall()

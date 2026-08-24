@@ -1,10 +1,50 @@
-"""
-SQLite database initialisation, schema creation, and connection helpers.
-"""
-
 import sqlite3
 from contextlib import contextmanager
 from config import config
+
+_query_count: int = 0
+
+def increment_query_count(count: int = 1) -> None:
+    global _query_count
+    _query_count += count
+
+def get_query_count() -> int:
+    return _query_count
+
+def reset_query_count() -> None:
+    global _query_count
+    _query_count = 0
+
+
+class CountingConnection:
+    """Wrapper that delegates to sqlite3.Connection and tracks query counts."""
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def execute(self, *args, **kwargs):
+        increment_query_count()
+        return self._conn.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        increment_query_count()
+        return self._conn.executemany(*args, **kwargs)
+
+    def executescript(self, *args, **kwargs):
+        increment_query_count()
+        return self._conn.executescript(*args, **kwargs)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
 
 def _get_connection() -> sqlite3.Connection:
     """Return a new SQLite connection with WAL mode enabled."""
@@ -16,7 +56,7 @@ def _get_connection() -> sqlite3.Connection:
 
 @contextmanager
 def get_db():
-    """Context manager that yields a DB connection and commits on success."""
+    """Context manager that yields a CountingConnection and commits on success."""
     conn = _get_connection()
     
     # Auto-initialize database tables if missing
@@ -29,14 +69,15 @@ def get_db():
     except Exception:
         pass
 
+    wrapper = CountingConnection(conn)
     try:
-        yield conn
-        conn.commit()
+        yield wrapper
+        wrapper.commit()
     except Exception:
-        conn.rollback()
+        wrapper.rollback()
         raise
     finally:
-        conn.close()
+        wrapper.close()
 
 def init_db() -> None:
     """Create all tables if they do not exist."""
@@ -73,6 +114,14 @@ def init_db() -> None:
                 value       REAL NOT NULL DEFAULT 0.0
             );
 
+            -- ── Batch MRU state (Phase 2 incremental bounds) ────────
+            CREATE TABLE IF NOT EXISTS batch_mru (
+                batch_id    INTEGER NOT NULL,
+                item        TEXT NOT NULL,
+                value       REAL NOT NULL DEFAULT 0.0,
+                PRIMARY KEY (batch_id, item)
+            );
+
             -- ── Pattern Tracker (Phase 5 HashMap) ───────────────────
             CREATE TABLE IF NOT EXISTS pattern_tracker (
                 pattern_key     TEXT    PRIMARY KEY,
@@ -104,6 +153,7 @@ def clear_db() -> None:
         conn.execute("DELETE FROM batches;")
         conn.execute("DELETE FROM prefix_utility;")
         conn.execute("DELETE FROM global_mru;")
+        conn.execute("DELETE FROM batch_mru;")
         conn.execute("DELETE FROM pattern_tracker;")
         conn.execute("DELETE FROM pipeline_runs;")
         conn.execute(
