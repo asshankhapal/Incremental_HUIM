@@ -9,7 +9,7 @@ import logging
 
 from config import config
 from database import get_db, clear_db
-from core.pipeline import Pipeline
+from services.pipeline_adapter import Pipeline
 from services import ingestion_service
 from models.transaction import TransactionIn
 

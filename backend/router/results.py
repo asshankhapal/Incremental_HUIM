@@ -78,6 +78,7 @@ def get_pattern_history(
 @router.get("/stats", summary="Get pipeline statistics")
 def get_stats():
     """Return aggregate statistics about the current state."""
+    from redis_client import redis_client
     with get_db() as conn:
         batch_counts = conn.execute(
             """
@@ -99,9 +100,12 @@ def get_stats():
             "SELECT COUNT(*) AS cnt FROM pipeline_runs"
         ).fetchone()["cnt"]
 
+    queued_in_redis = redis_client.llen('huim:transaction_queue')
+
     return {
         "batches": {r["status"]: r["cnt"] for r in batch_counts},
-        "total_transactions": total_txns,
+        "queued_in_redis": queued_in_redis,
+        "total_transactions": total_txns + queued_in_redis,
         "total_patterns_tracked": total_patterns,
         "total_pipeline_runs": total_runs,
     }

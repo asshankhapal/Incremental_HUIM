@@ -33,6 +33,9 @@ class PipelineConfig:
 
     # ── Database ─────────────────────────────────────────────────────
     db_path: str = os.path.join(_BASE_DIR, "huim.db")
+    
+    # ── Redis Queue ──────────────────────────────────────────────────
+    redis_url: str = "redis://localhost:6379/0"
 
     def to_dict(self) -> dict:
         return asdict(self)

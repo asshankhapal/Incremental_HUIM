@@ -1,148 +1,93 @@
 """
-Phase 1 — Sliding Window Update (Trigger-Based)
+PHASE 1: SLIDING WINDOW UPDATE (TRIGGER-BASED)
+================================================
+Flowchart boxes implemented here:
+  - Trigger Evaluation (Parallel): Condition 1 (time elapsed >= T) OR Condition 2 (queued txns >= W)
+  - Trigger Fired -> New Batch Arrives -> Identify Oldest Batch -> (utility-list update happens in Phase 2)
 
-Maintains a bounded sliding window of transaction batches.
-Evaluates two trigger conditions (time elapsed ≥ T, queued txns ≥ W)
-and, when fired, adds the newest batch and evicts the oldest.
+Design note: "Identify Oldest Batch / Remove outdated transactions from the window" is
+implemented here as *whole-batch* eviction — the window holds at most one batch's worth
+of transactions at a time, and an incoming batch evicts the previous one in full. This
+matches the flowchart's wording of "oldest BATCH" (as opposed to oldest individual
+transactions). If you need a strict per-transaction FIFO window instead, swap
+`evict_policy="whole_batch"` for a transaction-count based eviction in `add_batch`.
 """
 
-from __future__ import annotations
-
-import json
-import time
-from collections import deque
-from typing import Optional
-
-from config import config
-from database import get_db
-from models.transaction import Transaction, TransactionBatch
-
+import time as _time
 
 class SlidingWindow:
-    """
-    Manages the sliding window of transaction batches.
-
-    The window is a deque of batch_ids.  On each trigger:
-      1. Append the newest queued batch.
-      2. If the window exceeds `window_size` (in total transactions),
-         pop the oldest batch.
-    """
-
-    def __init__(self) -> None:
-        self._window: deque[int] = deque()          # batch_ids in window
-        self._last_run_time: float = time.time()
-        self._reload_window()
-
-    def should_trigger(self) -> bool:
-        """Return True if either trigger condition is satisfied."""
-        time_elapsed = time.time() - self._last_run_time >= config.time_threshold
-        queued_count = self._queued_transaction_count()
-        volume_met = queued_count >= config.batch_trigger_size
-        return time_elapsed or volume_met
-
-    def update(self) -> tuple[Optional[TransactionBatch], list[TransactionBatch]]:
+    def __init__(self, W, T_seconds=None, evict_policy="whole_batch"):
         """
-        Execute the sliding-window step.
-
-        Returns
-        -------
-        (batch_new, evicted_batches)
-            batch_new : the batch just added to the window (or None)
-            evicted_batches : list of batches just evicted from the window
+        W            : transaction-count threshold for Condition 2
+        T_seconds    : time threshold (seconds) for Condition 1. None disables Condition 1.
+        evict_policy : "whole_batch" (evict entire previous batch) or "fifo" (evict oldest
+                       individual transactions until len(window) <= W)
         """
-        self._last_run_time = time.time()
+        self.W = W
+        self.T_seconds = T_seconds
+        self.evict_policy = evict_policy
+        self.queue = []              # transactions waiting to be flushed into a batch
+        self.window = []             # transactions currently "in" the sliding window
+        self.last_trigger_time = _time.time()
+        self.batch_counter = 0
 
-        # Find the next queued batch
-        batch_new = self._pop_next_queued_batch()
-        if batch_new is None:
-            return None, []
+    # ---- Condition 1 & Condition 2 (parallel evaluation) -----------------
+    def condition_1_time_elapsed(self, now=None):
+        if self.T_seconds is None:
+            return False
+        now = now if now is not None else _time.time()
+        return (now - self.last_trigger_time) >= self.T_seconds
 
-        # Add to the window
-        self._window.append(batch_new.batch_id)
-        self._mark_batch_status(batch_new.batch_id, "active")
+    def condition_2_size_reached(self):
+        return len(self.queue) >= self.W
 
-        # Evict the oldest batches if window is over capacity
-        evicted_batches: list[TransactionBatch] = []
-        while self._window_transaction_count() > config.window_size and self._window:
-            oldest_id = self._window.popleft()
-            batch_old = self._load_batch(oldest_id)
-            self._mark_batch_status(oldest_id, "evicted")
-            evicted_batches.append(batch_old)
+    def trigger_fired(self, now=None):
+        """OR logic: at least one condition true -> start pipeline."""
+        return self.condition_1_time_elapsed(now) or self.condition_2_size_reached()
 
-        return batch_new, evicted_batches
+    # ---- Queueing new transactions ----------------------------------------
+    def enqueue(self, transactions):
+        """Transactions arrive continuously; they wait in queue until trigger fires."""
+        self.queue.extend(transactions)
 
-    
-    def _reload_window(self) -> None:
-        """Reload the window from DB (batches with status='active')."""
-        with get_db() as conn:
-            rows = conn.execute(
-                "SELECT batch_id FROM batches WHERE status='active' ORDER BY batch_id"
-            ).fetchall()
-            self._window = deque(r["batch_id"] for r in rows)
+    # ---- Trigger Fired -> New Batch Arrives -> Identify Oldest Batch ------
+    def flush_batch(self, now=None):
+        """
+        Call after trigger_fired() is True.
+        Returns (new_batch, removed_batch) — the batch just added to the window,
+        and the batch that was evicted from the window (or [] if nothing evicted).
+        If neither condition is met, caller should NOT call this (batch stays queued).
+        """
+        if not self.trigger_fired(now):
+            return None, None  # "batch waits in queue, re-evaluated on next arrival"
 
-    def _queued_transaction_count(self) -> int:
-        with get_db() as conn:
-            row = conn.execute(
-                """
-                SELECT COALESCE(SUM(cnt), 0) AS total
-                FROM (
-                    SELECT COUNT(*) AS cnt
-                    FROM transactions t
-                    JOIN batches b ON t.batch_id = b.batch_id
-                    WHERE b.status = 'queued'
-                )
-                """
-            ).fetchone()
-            return row["total"]
+        self.batch_counter += 1
+        new_batch = self.queue
+        self.queue = []
+        self.last_trigger_time = now if now is not None else _time.time()
 
-    def _window_transaction_count(self) -> int:
-        """Total transactions currently in the window."""
-        if not self._window:
-            return 0
-        placeholders = ",".join("?" for _ in self._window)
-        with get_db() as conn:
-            row = conn.execute(
-                f"SELECT COUNT(*) AS cnt FROM transactions WHERE batch_id IN ({placeholders})",
-                list(self._window),
-            ).fetchone()
-            return row["cnt"]
+        removed_batch = []
+        if self.evict_policy == "whole_batch":
+            removed_batch = self.window
+            self.window = list(new_batch)
+        else:  # "fifo"
+            self.window.extend(new_batch)
+            while len(self.window) > self.W:
+                removed_batch.append(self.window.pop(0))
 
-    def _pop_next_queued_batch(self) -> Optional[TransactionBatch]:
-        """Load the oldest queued batch and return it."""
-        with get_db() as conn:
-            row = conn.execute(
-                "SELECT batch_id FROM batches WHERE status='queued' ORDER BY batch_id LIMIT 1"
-            ).fetchone()
-            if row is None:
-                return None
-            return self._load_batch(row["batch_id"])
+        return new_batch, removed_batch
 
-    def _load_batch(self, batch_id: int) -> TransactionBatch:
-        """Load all transactions for a given batch_id."""
-        with get_db() as conn:
-            rows = conn.execute(
-                "SELECT tid, items, utilities FROM transactions WHERE batch_id = ?",
-                (batch_id,),
-            ).fetchall()
-        txns = [
-            Transaction(
-                tid=r["tid"],
-                items=json.loads(r["items"]),
-                utilities=json.loads(r["utilities"]),
-                batch_id=batch_id,
-            )
-            for r in rows
-        ]
-        return TransactionBatch(batch_id=batch_id, transactions=txns)
+if __name__ == "__main__":
+    # quick smoke test
+    sw = SlidingWindow(W=10, evict_policy="whole_batch")
+    sw.enqueue(list(range(10)))
+    print("trigger fired after 10 queued:", sw.trigger_fired())
+    new_b, removed_b = sw.flush_batch()
+    print("batch 1:", new_b, "| removed:", removed_b)
 
-    @staticmethod
-    def _mark_batch_status(batch_id: int, status: str) -> None:
-        with get_db() as conn:
-            conn.execute(
-                "UPDATE batches SET status = ? WHERE batch_id = ?",
-                (status, batch_id),
-            )
-
-    @property
-    def active_batch_ids(self) -> list[int]:
-        return list(self._window)
+    sw.enqueue(list(range(10, 17)))
+    print("trigger fired after 7 more queued (< W):", sw.trigger_fired())
+    # simulate Condition 1 firing instead (time elapsed) by forcing it
+    sw.T_seconds = 0
+    new_b, removed_b = sw.flush_batch()
+    print("batch 2:", new_b, "| removed:", removed_b)

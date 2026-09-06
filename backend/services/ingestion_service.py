@@ -13,41 +13,24 @@ from models.transaction import TransactionIn
 
 def ingest_batch(transactions: List[TransactionIn]) -> dict:
     """
-    Store a list of transactions as a new batch.
-
-    Each call creates one batch record, then inserts all transactions
-    linked to it.  The batch starts with status='queued' so Phase 1
-    can pick it up on the next trigger.
+    Store a list of transactions in the Redis queue.
 
     Returns
     -------
-    dict with batch_id, transaction_count, and status.
+    dict with transaction_count and status.
     """
-    with get_db() as conn:
-        # Create the batch
-        cursor = conn.execute(
-            "INSERT INTO batches (status) VALUES ('queued')"
-        )
-        batch_id: int = cursor.lastrowid  # type: ignore[assignment]
+    from redis_client import redis_client
 
-        # Insert transactions
-        rows = [
-            (
-                batch_id,
-                json.dumps(txn.items),
-                json.dumps(txn.utilities),
-            )
-            for txn in transactions
-        ]
-        conn.executemany(
-            "INSERT INTO transactions (batch_id, items, utilities) VALUES (?, ?, ?)",
-            rows,
-        )
+    if not transactions:
+        return {"transaction_count": 0, "status": "empty"}
+
+    serialized_txns = [txn.model_dump_json() for txn in transactions]
+    redis_client.rpush('huim:transaction_queue', *serialized_txns)
 
     return {
-        "batch_id": batch_id,
+        "batch_id": None,
         "transaction_count": len(transactions),
-        "status": "queued",
+        "status": "queued_in_redis",
     }
 
 

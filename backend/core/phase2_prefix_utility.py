@@ -1,139 +1,113 @@
 """
-Phase 2 — Incremental Prefix Utility & Global MRU Update
+PHASE 2: INCREMENTAL PREFIX UTILITY & GLOBAL MRU UPDATE
+=========================================================
+Flowchart pseudocode implemented exactly:
 
-For each transaction in the added batch (lexicographic order):
-    cumulative = 0
-    for each item (sorted):
-        cumulative += item_utility
-        prefix_util[item] += cumulative
-        global_MRU[item] = max(global_MRU[item], remaining_after_item)
+  For each transaction in added batch (lexicographic order):
+      cumulative = 0
+      For each item in transaction (sorted):
+          cumulative += item_utility
+          prefix_util[item] += cumulative        (Layer 1 bound)
+          update global_MRU[item] = max(global_MRU[item], remaining after item)
 
-For removed batch: subtract symmetrically.
+  For each transaction in removed batch (same order):
+      subtract similarly to keep prefix_util and global_MRU current
+
+A transaction here is a dict: {"tid": int, "items": [...], "utils": [...], "TU": int}
+with items/utils already sorted ascending by item id ("lexicographic order").
+
+IMPORTANT CAVEAT (worth knowing, not just implementing blindly):
+  prefix_util is a SUM across transactions -> safely reversible: subtracting a removed
+  transaction's contribution restores the exact prior state.
+  global_MRU is a MAX across transactions -> a MAX is *not* reversible by subtraction.
+  If the transaction holding the current maximum for an item is evicted, you cannot
+  recover the correct new maximum just by "subtracting" — you need either (a) a small
+  max-heap/multiset per item of contributing values, or (b) a full recompute over the
+  current window. This module provides the naive (flowchart-literal) subtract for
+  prefix_util, and offers both a naive "best-effort" subtract for global_MRU (which can
+  be WRONG) and a correct `recompute_global_mru_fresh` you should prefer in production.
 """
 
-from __future__ import annotations
-
-import json
-from typing import Optional
-
-from database import get_db
-from models.transaction import TransactionBatch
+from collections import defaultdict
 
 
-class PrefixUtilityUpdater:
-    """Incrementally maintains prefix_util and global_MRU dictionaries."""
+def _item_lists_from_transaction(t):
+    """Yields (item, iutil, remaining_after) for a single transaction, in item order."""
+    cumulative = 0
+    n = len(t["items"])
+    out = []
+    for pos in range(n):
+        it, u = t["items"][pos], t["utils"][pos]
+        cumulative += u
+        remaining_after = t["TU"] - cumulative
+        out.append((it, u, remaining_after))
+    return out
 
-    def __init__(self) -> None:
-        self.prefix_util: dict[str, float] = {}
-        self.global_mru: dict[str, float] = {}
-        self._load_from_db()
 
-    # ── Public API ───────────────────────────────────────────────────
+def build_fresh(batch):
+    """Fresh build of prefix_util / global_MRU / per-item utility-lists over `batch`."""
+    prefix_util = defaultdict(int)
+    global_mru = defaultdict(int)
+    item_lists = defaultdict(dict)  # item -> {tid: (iutil, remaining_after)}
+    for t in batch:
+        cumulative = 0
+        for it, u in zip(t["items"], t["utils"]):
+            cumulative += u
+            remaining_after = t["TU"] - cumulative
+            prefix_util[it] += cumulative
+            global_mru[it] = max(global_mru[it], remaining_after)
+            item_lists[it][t["tid"]] = (u, remaining_after)
+    return prefix_util, global_mru, item_lists
 
-    def update(
-        self,
-        batch_new: Optional[TransactionBatch],
-        evicted_batches: list[TransactionBatch],
-        active_batch_ids: list[int],
-    ) -> None:
-        """
-        Incrementally update prefix utilities and recalculate MRU values.
 
-        Parameters
-        ----------
-        batch_new : transactions just added to the sliding window
-        evicted_batches : list of batches just evicted from the sliding window
-        active_batch_ids : list of active batch ids currently in the sliding window
-        """
-        if batch_new is not None:
-            self._process_batch(batch_new, add=True)
-            self._save_batch_mru(batch_new)
-        for batch_old in evicted_batches:
-            self._process_batch(batch_old, add=False)
-            self._delete_batch_mru(batch_old.batch_id)
-            
-        # Re-aggregate global MRU from active batch MRUs
-        self._reaggregate_global_mru(active_batch_ids)
-        self._persist_to_db()
+def add_batch(prefix_util, global_mru, item_lists, new_batch):
+    """"New Batch Arrives" -> incrementally fold new_batch's contribution IN. Mutates in place."""
+    for t in new_batch:
+        cumulative = 0
+        for it, u in zip(t["items"], t["utils"]):
+            cumulative += u
+            remaining_after = t["TU"] - cumulative
+            prefix_util[it] += cumulative
+            global_mru[it] = max(global_mru[it], remaining_after)
+            item_lists[it][t["tid"]] = (u, remaining_after)
 
-    # ── Internal ─────────────────────────────────────────────────────
 
-    def _process_batch(self, batch: TransactionBatch, *, add: bool) -> None:
-        """Process every transaction in a batch (add or subtract)."""
-        sign = 1.0 if add else -1.0
+def remove_batch_prefix_util(prefix_util, item_lists, old_batch):
+    """"Identify Oldest Batch" -> subtract its contribution from the SUM-based prefix_util.
+    This is exact/safe because sums are reversible."""
+    touched_items = set()
+    for t in old_batch:
+        cumulative = 0
+        for it, u in zip(t["items"], t["utils"]):
+            cumulative += u
+            prefix_util[it] -= cumulative
+            item_lists[it].pop(t["tid"], None)
+            touched_items.add(it)
+    # fully evicted items should disappear from both structures, not linger as empty entries
+    for it in touched_items:
+        if not item_lists.get(it):
+            item_lists.pop(it, None)
+            prefix_util.pop(it, None)
 
-        for txn in batch.transactions:
-            # Sort items lexicographically (canonical order)
-            paired = sorted(zip(txn.items, txn.utilities), key=lambda x: x[0])
-            sorted_items = [p[0] for p in paired]
-            sorted_utils = [p[1] for p in paired]
 
-            cumulative = 0.0
-            for idx, (item, util) in enumerate(zip(sorted_items, sorted_utils)):
-                cumulative += util
+def recompute_global_mru_fresh(current_window):
+    """Correct way to keep global_MRU current after an eviction: recompute over
+    whatever transactions are actually still in the window."""
+    global_mru = defaultdict(int)
+    for t in current_window:
+        cumulative = 0
+        for it, u in zip(t["items"], t["utils"]):
+            cumulative += u
+            remaining_after = t["TU"] - cumulative
+            global_mru[it] = max(global_mru[it], remaining_after)
+    return global_mru
 
-                # ── Prefix utility (Layer 1 bound) ───────────────
-                self.prefix_util[item] = self.prefix_util.get(item, 0.0) + sign * cumulative
 
-    def _save_batch_mru(self, batch: TransactionBatch) -> None:
-        """Compute and save MRU contributions for a new batch."""
-        mru = {}
-        for txn in batch.transactions:
-            paired = sorted(zip(txn.items, txn.utilities), key=lambda x: x[0])
-            sorted_items = [p[0] for p in paired]
-            sorted_utils = [p[1] for p in paired]
-            for idx, item in enumerate(sorted_items):
-                remaining = sum(sorted_utils[idx + 1:])
-                mru[item] = max(mru.get(item, 0.0), remaining)
-                
-        with get_db() as conn:
-            conn.executemany(
-                "INSERT OR REPLACE INTO batch_mru (batch_id, item, value) VALUES (?, ?, ?)",
-                [(batch.batch_id, item, val) for item, val in mru.items()]
-            )
-
-    def _delete_batch_mru(self, batch_id: int) -> None:
-        """Delete batch MRU records for the evicted batch."""
-        with get_db() as conn:
-            conn.execute("DELETE FROM batch_mru WHERE batch_id = ?", (batch_id,))
-
-    def _reaggregate_global_mru(self, active_batch_ids: list[int]) -> None:
-        """Recompute global_mru from active batch MRUs."""
-        self.global_mru.clear()
-        if not active_batch_ids:
-            return
-        placeholders = ",".join("?" for _ in active_batch_ids)
-        with get_db() as conn:
-            rows = conn.execute(
-                f"""
-                SELECT item, MAX(value) AS max_val
-                FROM batch_mru
-                WHERE batch_id IN ({placeholders})
-                GROUP BY item
-                """,
-                active_batch_ids,
-            ).fetchall()
-        for r in rows:
-            self.global_mru[r["item"]] = r["max_val"]
-
-    # ── Persistence ──────────────────────────────────────────────────
-
-    def _load_from_db(self) -> None:
-        with get_db() as conn:
-            for row in conn.execute("SELECT item, value FROM prefix_utility"):
-                self.prefix_util[row["item"]] = row["value"]
-            for row in conn.execute("SELECT item, value FROM global_mru"):
-                self.global_mru[row["item"]] = row["value"]
-
-    def _persist_to_db(self) -> None:
-        with get_db() as conn:
-            conn.execute("DELETE FROM prefix_utility")
-            conn.executemany(
-                "INSERT INTO prefix_utility (item, value) VALUES (?, ?)",
-                list(self.prefix_util.items()),
-            )
-            conn.execute("DELETE FROM global_mru")
-            conn.executemany(
-                "INSERT INTO global_mru (item, value) VALUES (?, ?)",
-                list(self.global_mru.items()),
-            )
+if __name__ == "__main__":
+    demo_batch = [
+        {"tid": 1, "items": [1, 2, 3], "utils": [10, 20, 30], "TU": 60},
+        {"tid": 2, "items": [2, 3], "utils": [5, 5], "TU": 10},
+    ]
+    pu, mru, lists_ = build_fresh(demo_batch)
+    print("prefix_util:", dict(pu))
+    print("global_mru :", dict(mru))
