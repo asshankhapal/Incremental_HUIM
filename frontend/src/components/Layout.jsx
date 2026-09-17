@@ -18,13 +18,13 @@ const navItems = [
 
 export default function Layout() {
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="flex h-screen overflow-hidden bg-bg-page">
       {/* ── Sidebar ──────────────────────────────────────────── */}
-      <aside className="glass-strong flex flex-col w-64 min-w-64 h-full border-r border-border-subtle">
+      <aside className="flex flex-col w-64 min-w-64 h-full bg-bg-page border-r border-border-default">
         {/* Logo */}
-        <div className="flex items-center gap-3 px-5 py-5 border-b border-border-subtle">
-          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-primary-500/20">
-            <Cpu className="w-5 h-5 text-primary-400" />
+        <div className="flex items-center gap-3 px-5 py-5 border-b border-border-default">
+          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-accent text-white">
+            <Cpu className="w-5 h-5" />
           </div>
           <div>
             <h1 className="text-sm font-bold tracking-wide text-text-primary">HUIM Pipeline</h1>
@@ -40,27 +40,27 @@ export default function Layout() {
               to={to}
               end={to === '/'}
               className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-200 group ${
+                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                   isActive
-                    ? 'bg-primary-500/15 text-primary-400 shadow-sm shadow-primary-500/10'
-                    : 'text-text-secondary hover:text-text-primary hover:bg-white/[0.04]'
+                    ? 'bg-accent text-white'
+                    : 'text-text-secondary hover:text-text-primary hover:bg-bg-card'
                 }`
               }
             >
-              <Icon className="w-[18px] h-[18px] transition-transform group-hover:scale-110" />
+              <Icon className="w-[18px] h-[18px]" />
               {label}
             </NavLink>
           ))}
         </nav>
 
         {/* Footer */}
-        <div className="px-5 py-4 border-t border-border-subtle">
+        <div className="px-5 py-4 border-t border-border-default">
           <p className="text-[10px] text-text-muted">v0.1.0 · FastAPI + React</p>
         </div>
       </aside>
 
       {/* ── Main Content ─────────────────────────────────────── */}
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 overflow-y-auto bg-bg-card">
         <div className="max-w-7xl mx-auto px-6 py-8">
           <Outlet />
         </div>

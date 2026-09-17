@@ -10,7 +10,6 @@ from typing import List
 from database import get_db
 from models.transaction import TransactionIn
 
-
 def ingest_batch(transactions: List[TransactionIn]) -> dict:
     """
     Store a list of transactions in the Redis queue.
@@ -33,7 +32,6 @@ def ingest_batch(transactions: List[TransactionIn]) -> dict:
         "status": "queued_in_redis",
     }
 
-
 def get_transactions_by_batch(batch_id: int) -> list[dict]:
     """Return all transactions for a given batch_id."""
     with get_db() as conn:
@@ -50,7 +48,6 @@ def get_transactions_by_batch(batch_id: int) -> list[dict]:
         }
         for r in rows
     ]
-
 
 def get_all_batches() -> list[dict]:
     """Return a summary of all batches."""

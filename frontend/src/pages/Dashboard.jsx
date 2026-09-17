@@ -73,7 +73,7 @@ export default function Dashboard() {
   const totalBatches = stats ? Object.values(stats.batches || {}).reduce((a, b) => a + b, 0) : 0;
 
   return (
-    <div className="animate-fade-in">
+    <div>
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-text-primary">Dashboard</h1>
@@ -83,11 +83,11 @@ export default function Dashboard() {
       </div>
 
       {/* Stats row */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8 stagger">
-        <StatCard icon={Database} label="Transactions" value={stats?.total_transactions ?? 0} color="primary" />
-        <StatCard icon={Layers} label="Batches" value={totalBatches} subtitle={stats?.batches?.queued ? `${stats.batches.queued} queued` : undefined} color="info" />
-        <StatCard icon={Activity} label="Pipeline Runs" value={stats?.total_pipeline_runs ?? 0} color="success" />
-        <StatCard icon={TrendingUp} label="Patterns Tracked" value={stats?.total_patterns_tracked ?? 0} color="warning" />
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <StatCard icon={Database} label="Transactions" value={stats?.total_transactions ?? 0} />
+        <StatCard icon={Layers} label="Batches" value={totalBatches} subtitle={stats?.batches?.queued ? `${stats.batches.queued} queued` : undefined} />
+        <StatCard icon={Activity} label="Pipeline Runs" value={stats?.total_pipeline_runs ?? 0} />
+        <StatCard icon={TrendingUp} label="Patterns Tracked" value={stats?.total_patterns_tracked ?? 0} />
       </div>
 
       {/* Quick Actions */}
@@ -95,10 +95,10 @@ export default function Dashboard() {
         <button
           onClick={handleRunPipeline}
           disabled={actionLoading === 'pipeline'}
-          className="w-full card-hover glass rounded-xl p-5 flex items-center gap-4 text-left border border-success-500/20 hover:border-success-400/40 transition-all cursor-pointer disabled:opacity-50"
+          className="w-full rounded-lg border border-border-default bg-bg-surface p-5 flex items-center gap-4 text-left hover:bg-bg-card-hover transition-colors cursor-pointer disabled:opacity-50"
         >
-          <div className="flex items-center justify-center w-11 h-11 rounded-lg bg-success-500/15">
-            <Play className="w-5 h-5 text-success-400" />
+          <div className="flex items-center justify-center w-11 h-11 rounded-lg bg-bg-muted">
+            <Play className="w-5 h-5 text-text-secondary" />
           </div>
           <div className="flex-1">
             <p className="text-sm font-semibold text-text-primary">
@@ -113,10 +113,10 @@ export default function Dashboard() {
       {/* Two-column: Top-K + Recent Runs */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Top-K Patterns */}
-        <div className="lg:col-span-2 glass rounded-xl border border-border-subtle overflow-hidden">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border-subtle">
+        <div className="lg:col-span-2 rounded-lg border border-border-default bg-bg-surface overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border-default">
             <h2 className="text-sm font-semibold text-text-primary">Top-K High-Utility Patterns</h2>
-            <Link to="/results" className="text-xs font-medium text-primary-400 hover:text-primary-300 transition-colors">
+            <Link to="/results" className="text-xs font-medium text-text-secondary hover:text-text-primary transition-colors">
               View all →
             </Link>
           </div>
@@ -126,7 +126,7 @@ export default function Dashboard() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="text-left text-text-muted text-xs uppercase tracking-wider">
+                  <tr className="text-left text-text-muted text-xs uppercase tracking-wider bg-bg-card">
                     <th className="px-5 py-3 font-medium">Rank</th>
                     <th className="px-5 py-3 font-medium">Pattern</th>
                     <th className="px-5 py-3 font-medium text-right">Avg Utility</th>
@@ -134,16 +134,16 @@ export default function Dashboard() {
                     <th className="px-5 py-3 font-medium text-right">Total Utility</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-border-subtle">
+                <tbody className="divide-y divide-border-muted">
                   {topK.map((p) => (
-                    <tr key={p.rank} className="hover:bg-white/[0.02] transition-colors">
+                    <tr key={p.rank} className="hover:bg-bg-card transition-colors">
                       <td className="px-5 py-3">
-                        <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-primary-500/10 text-primary-400 text-xs font-bold">
+                        <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-bg-muted text-text-primary text-xs font-bold">
                           {p.rank}
                         </span>
                       </td>
                       <td className="px-5 py-3 font-mono text-xs text-text-primary">{p.pattern_key}</td>
-                      <td className="px-5 py-3 text-right font-semibold text-success-400">{p.avg_util.toFixed(4)}</td>
+                      <td className="px-5 py-3 text-right font-semibold text-text-primary">{p.avg_util.toFixed(4)}</td>
                       <td className="px-5 py-3 text-right text-text-secondary">{p.count}</td>
                       <td className="px-5 py-3 text-right text-text-secondary">{p.total_util.toFixed(4)}</td>
                     </tr>
@@ -155,19 +155,19 @@ export default function Dashboard() {
         </div>
 
         {/* Recent Runs */}
-        <div className="glass rounded-xl border border-border-subtle overflow-hidden">
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border-subtle">
+        <div className="rounded-lg border border-border-default bg-bg-surface overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-border-default">
             <h2 className="text-sm font-semibold text-text-primary">Recent Runs</h2>
-            <Link to="/pipeline" className="text-xs font-medium text-primary-400 hover:text-primary-300 transition-colors">
+            <Link to="/pipeline" className="text-xs font-medium text-text-secondary hover:text-text-primary transition-colors">
               View all →
             </Link>
           </div>
           {runs.length === 0 ? (
             <EmptyState title="No runs yet" message="Trigger the pipeline to see run history." />
           ) : (
-            <div className="divide-y divide-border-subtle">
+            <div className="divide-y divide-border-muted">
               {runs.map((r) => (
-                <div key={r.run_id} className="px-5 py-3.5 hover:bg-white/[0.02] transition-colors">
+                <div key={r.run_id} className="px-5 py-3.5 hover:bg-bg-card transition-colors">
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-semibold text-text-primary">Run #{r.run_id}</span>
                     <StatusBadge status={r.status} />
@@ -182,15 +182,7 @@ export default function Dashboard() {
 
       {/* Toast notification */}
       {toast && (
-        <div
-          className={`fixed bottom-6 right-6 z-50 animate-slide-up glass rounded-lg px-5 py-3 border text-sm font-medium shadow-2xl ${
-            toast.type === 'error'
-              ? 'border-error-500/30 text-error-400'
-              : toast.type === 'warning'
-                ? 'border-warning-500/30 text-warning-400'
-                : 'border-success-500/30 text-success-400'
-          }`}
-        >
+        <div className="fixed bottom-6 right-6 z-50 rounded-lg bg-accent text-white px-5 py-3 text-sm font-medium shadow-lg">
           {toast.msg}
         </div>
       )}

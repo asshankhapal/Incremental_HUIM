@@ -62,6 +62,18 @@ export function runDataset(transactions, batch_size, top_k) {
   });
 }
 
+export async function runDatasetFile(file, batch_size, top_k) {
+  const res = await fetch(
+    `/api/pipeline/run-dataset-file?batch_size=${encodeURIComponent(batch_size)}&top_k=${encodeURIComponent(top_k)}`,
+    { method: 'POST', headers: { 'Content-Type': file.type || 'text/plain' }, body: file }
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Request failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 export function fetchPipelineStatus() {
   return request('/api/pipeline/status');
 }

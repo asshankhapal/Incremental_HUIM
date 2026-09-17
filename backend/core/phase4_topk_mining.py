@@ -65,7 +65,8 @@ class TopKHeap:
         return sorted(self.heap, key=lambda z: -z[0])
 
 
-def mine_top_k(item_lists, prefix_util, global_mru, k, start_min_util=0):
+def mine_top_k(item_lists, prefix_util, global_mru, k, start_min_util=0,
+               max_depth=8, node_budget=500_000):
     """
     item_lists   : dict item -> {tid: (iutil, remaining_util)}   (built in Phase 2)
     prefix_util  : dict item -> Layer-1 bound                     (built in Phase 2)
@@ -73,6 +74,8 @@ def mine_top_k(item_lists, prefix_util, global_mru, k, start_min_util=0):
     k            : how many top itemsets to keep
     start_min_util : initial current_min_util. Pass 0 on cold start, or the value
                       produced by Phase 3 (compute_hdkt_threshold) otherwise.
+    max_depth    : maximum itemset size to explore (prevents exponential blowup)
+    node_budget  : stop DFS after this many nodes to guarantee bounded runtime
 
     Returns (top_k_list, stats) where top_k_list is [(utility, itemset), ...] descending,
     and stats reports pruning activity for diagnostics.
@@ -80,10 +83,17 @@ def mine_top_k(item_lists, prefix_util, global_mru, k, start_min_util=0):
     header_table = sorted(item_lists.keys())  # "Header Table (items in lexicographic order)"
     topk = TopKHeap(k)
     topk.current_min_util = start_min_util
-    stats = {"nodes": 0, "hui_found": 0, "pruned_layer1": 0, "pruned_layer2_ub": 0, "empty_join": 0}
+    stats = {"nodes": 0, "hui_found": 0, "pruned_layer1": 0, "pruned_layer2_ub": 0,
+             "empty_join": 0, "pruned_depth": 0, "budget_exhausted": False}
 
-    def dfs_extend(p_itemset, p_list, last_item):
+    def dfs_extend(p_itemset, p_list, last_item, depth):
+        if depth >= max_depth:
+            stats["pruned_depth"] += 1
+            return
         for y in header_table:
+            if stats["nodes"] >= node_budget:
+                stats["budget_exhausted"] = True
+                return
             if y <= last_item:
                 continue  # only extend with items AFTER last_item in the fixed order
             stats["nodes"] += 1
@@ -101,13 +111,18 @@ def mine_top_k(item_lists, prefix_util, global_mru, k, start_min_util=0):
                 topk.offer(py_itemset, util)   # "HUI! -> add to priority queue"
             # else: "Not HUI but may extend" -- fall through to the UB check regardless
 
-            ub = util + global_mru.get(y, 0)   # Layer 2 bound
+            # Upper bound: exact util + sum of remaining utilities (tighter than global_mru alone)
+            remaining_sum = sum(rutil for _iutil, rutil in py_list.values())
+            ub = min(util + global_mru.get(y, 0), util + remaining_sum)   # Layer 2 bound
             if ub >= topk.current_min_util:
-                dfs_extend(py_itemset, py_list, y)     # "Recursively call DFS_Extend(PY)"
+                dfs_extend(py_itemset, py_list, y, depth + 1)     # "Recursively call DFS_Extend(PY)"
             else:
                 stats["pruned_layer2_ub"] += 1          # "Prune branch (skip Y)"
 
     for x in header_table:
+        if stats["nodes"] >= node_budget:
+            stats["budget_exhausted"] = True
+            break
         if prefix_util[x] < topk.current_min_util:
             stats["pruned_layer1"] += 1
             continue  # "Prune entire branch (skip X and all its supersets)"
@@ -118,7 +133,7 @@ def mine_top_k(item_lists, prefix_util, global_mru, k, start_min_util=0):
             stats["hui_found"] += 1
             topk.offer((x,), util)
 
-        dfs_extend((x,), x_list, x)   # "Call DFS_Extend(X) with its utility list"
+        dfs_extend((x,), x_list, x, 1)   # "Call DFS_Extend(X) with its utility list"
 
     return topk.results(), stats
 

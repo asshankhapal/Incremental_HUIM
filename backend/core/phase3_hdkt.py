@@ -29,14 +29,29 @@ def extract_watchlist(active_patterns, k):
     return ranked[:k]
 
 
-def itemset_utility_in_batch(itemset, batch):
+def itemset_utility_in_batch(itemset, batch, _cache={}):
     """U(P, Batch): exact utility of itemset P if evaluated against a given batch's
-    transactions (0 if P is not fully supported by any transaction in that batch)."""
-    total = 0
-    for t in batch:
-        s = set(t["items"])
-        if set(itemset).issubset(s):
+    transactions (0 if P is not fully supported by any transaction in that batch).
+    Uses a per-batch cache of pre-built item sets and utility maps for speed."""
+    # Build a cache key from batch identity (id is stable within one call chain)
+    batch_key = id(batch)
+    if batch_key not in _cache:
+        indexed = []
+        for t in batch:
+            item_set = frozenset(t["items"])
             util_map = dict(zip(t["items"], t["utils"]))
+            indexed.append((item_set, util_map))
+        _cache[batch_key] = indexed
+        # Keep cache small: only hold last 2 batches
+        if len(_cache) > 2:
+            oldest = next(iter(_cache))
+            del _cache[oldest]
+    indexed = _cache[batch_key]
+
+    itemset_set = set(itemset)
+    total = 0
+    for item_set, util_map in indexed:
+        if itemset_set.issubset(item_set):
             total += sum(util_map[i] for i in itemset)
     return total
 
